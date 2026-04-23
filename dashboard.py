@@ -1,7 +1,15 @@
 """
 Money Clarity Dashboard
 Run: streamlit run dashboard.py
+
+Auth flow:
+  - Uses Supabase Auth (supabase-py) with email OTP or Google OAuth
+  - Access token stored in st.session_state["sb_session"]
+  - All API calls to FastAPI backend include Authorization: Bearer <token>
+  - Logout invalidates session both client-side and server-side
 """
+
+import asyncio
 
 import streamlit as st
 import pandas as pd
@@ -10,6 +18,22 @@ import plotly.graph_objects as go
 from io import StringIO, BytesIO
 import re
 import base64
+
+# Supabase Auth integration
+try:
+    from streamlit_app.auth_component import (
+        handle_auth_callback,
+        init_auth_state,
+        is_authenticated,
+        get_access_token,
+        get_user,
+        logout,
+        render_login_ui,
+    )
+    from streamlit_app.api_client import ApiClient
+    SUPABASE_AUTH_AVAILABLE = True
+except ImportError:
+    SUPABASE_AUTH_AVAILABLE = False
 
 # Google OAuth / Gmail API
 try:
@@ -27,6 +51,28 @@ except ImportError:
     ANTHROPIC_AVAILABLE = False
 
 st.set_page_config(page_title="Money Clarity OS", page_icon="💰", layout="wide")
+
+# ── Auth: handle OAuth callback & gate the app ────────────────────────────────
+if SUPABASE_AUTH_AVAILABLE:
+    init_auth_state()
+    handle_auth_callback()  # processes ?code= param from Supabase OAuth redirect
+
+    if not is_authenticated():
+        render_login_ui()
+        st.stop()  # everything below only renders for authenticated users
+
+    # Render logout button in sidebar
+    with st.sidebar:
+        user = get_user()
+        email = user.email if user else "User"
+        st.markdown(f"**Signed in as:** {email}")
+        if st.button("Sign out", use_container_width=True):
+            logout()
+
+    # Build API client with current token (auto-refreshes on 401)
+    def _get_api_client() -> "ApiClient":
+        token = get_access_token()
+        return ApiClient(access_token=token)
 
 # ── Core palette ──────────────────────────────────────────────────────────────
 C_GREEN  = "#16a34a"   # positive — savings, surplus, growth
@@ -506,7 +552,27 @@ def fetch_gmail_attachments_oauth(creds, max_results=50):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# OAUTH CALLBACK — must run before any UI is rendered
+# PERSISTENT DATA: Load stored summaries from backend on each session start
+# This answers the product question: data uploaded/connected in past sessions
+# is immediately visible on the next login.
+# ══════════════════════════════════════════════════════════════════════════════
+if SUPABASE_AUTH_AVAILABLE and "backend_summaries_loaded" not in st.session_state:
+    try:
+        client = _get_api_client()
+        summaries = asyncio.run(client.get_summary())
+        if summaries:
+            st.session_state["backend_summaries"] = summaries
+        st.session_state["backend_summaries_loaded"] = True
+
+        # Also check Gmail status
+        gmail_status = asyncio.run(client.get_gmail_status())
+        st.session_state["gmail_connected_backend"] = gmail_status.get("connected", False)
+    except Exception:
+        st.session_state["backend_summaries_loaded"] = True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OAUTH CALLBACK — must run before any UI is rendered (legacy local Gmail flow)
 # ══════════════════════════════════════════════════════════════════════════════
 _params = st.query_params
 if "code" in _params and "gmail_flow" in st.session_state and GOOGLE_LIBS_AVAILABLE:
@@ -599,6 +665,18 @@ with st.expander(_exp_label, expanded=not data_loaded):
                     load_errors.append(f"**{f.name}:** {err}")
                 else:
                     frames.append(dff)
+                    # If backend is available, persist to Supabase
+                    if SUPABASE_AUTH_AVAILABLE:
+                        try:
+                            api = _get_api_client()
+                            file_bytes = f.getvalue()
+                            up_result = asyncio.run(api.upload_file(file_bytes, f.name))
+                            parse_result = asyncio.run(api.parse_upload(up_result["upload_id"]))
+                            st.caption(f"✅ Saved {parse_result['inserted']} transactions to your account")
+                            # Invalidate cached summaries so they reload
+                            st.session_state.pop("backend_summaries_loaded", None)
+                        except Exception as _be:
+                            st.caption(f"⚠️ Could not persist to backend: {_be}")
 
         # 🟡 Inline privacy helper — sits right below the uploader
         st.markdown(f'<p style="font-size:0.78rem;color:{C_GREY};margin-top:0.25rem;">'
@@ -615,7 +693,35 @@ Output CSV only — no extra text.""", language=None)
                     f'<hr style="flex:1;border:none;border-top:1px solid #e5e7eb;margin:0;">'
                     f'</div>', unsafe_allow_html=True)
 
-        if "gmail_creds" in st.session_state:
+        # Backend-powered Gmail connect (preferred when auth available)
+        if SUPABASE_AUTH_AVAILABLE and st.session_state.get("gmail_connected_backend"):
+            gc1, gc2, gc3 = st.columns([2, 1, 1])
+            with gc1:
+                st.success("📧 Gmail connected (server-side)")
+            with gc2:
+                if st.button("Sync now", key="backend_sync_btn", use_container_width=True):
+                    try:
+                        api = _get_api_client()
+                        result = asyncio.run(api.sync_gmail())
+                        st.success(f"Synced: {result['new_files']} new files, {result['transactions_imported']} transactions")
+                        st.session_state.pop("backend_summaries_loaded", None)
+                    except Exception as e:
+                        st.error(f"Sync failed: {e}")
+            with gc3:
+                st.caption(f"Last synced")
+        elif SUPABASE_AUTH_AVAILABLE:
+            if st.button("🔗 Connect Gmail (secure server-side)", use_container_width=True):
+                try:
+                    api = _get_api_client()
+                    auth_url = asyncio.run(api.get_gmail_connect_url())
+                    st.markdown(
+                        f'<a href="{auth_url}" target="_blank">Click here to authorize Gmail access</a>',
+                        unsafe_allow_html=True
+                    )
+                    st.info("After authorizing, return here and refresh the page to sync.")
+                except Exception as e:
+                    st.error(f"Could not initiate Gmail connect: {e}")
+        elif "gmail_creds" in st.session_state:
             gc1, gc2, gc3 = st.columns([2, 1, 1])
             with gc1:
                 st.success("📧 Gmail connected", icon=None)
