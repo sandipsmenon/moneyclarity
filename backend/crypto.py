@@ -66,8 +66,8 @@ def encrypt(plaintext: str | bytes) -> str:
     ])
 
 
-def decrypt(token: str) -> str:
-    """Decrypt a stored token string and return plaintext."""
+def decrypt_bytes(token: str) -> bytes:
+    """Decrypt a stored token string and return raw plaintext bytes."""
     parts = token.split(_SEPARATOR)
     if len(parts) != 3:
         raise ValueError("Invalid encrypted token format")
@@ -82,8 +82,12 @@ def decrypt(token: str) -> str:
     aesgcm = AESGCM(key)
     nonce = bytes.fromhex(nonce_hex)
     ciphertext = bytes.fromhex(ct_hex)
-    plaintext = aesgcm.decrypt(nonce, ciphertext, None)
-    return plaintext.decode()
+    return aesgcm.decrypt(nonce, ciphertext, None)
+
+
+def decrypt(token: str) -> str:
+    """Decrypt a stored token string and return plaintext as UTF-8 string."""
+    return decrypt_bytes(token).decode()
 
 
 def reencrypt_value(token: str) -> Optional[str]:

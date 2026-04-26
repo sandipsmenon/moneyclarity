@@ -20,7 +20,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.auth import UserId
-from backend.crypto import decrypt
+from backend.crypto import decrypt_bytes
 from backend.services.parser_service import parse_statement
 from backend.services.supabase_client import admin_client
 
@@ -67,15 +67,11 @@ async def parse_upload(body: ParseRequest, user_id: UserId):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to retrieve file: {exc}") from exc
 
-    # Decrypt
+    # Decrypt — returns original raw bytes (works for both CSV and binary XLSX)
     try:
-        file_bytes = decrypt(encrypted_content.decode()).encode("latin-1")
-    except Exception:
-        # If stored as raw bytes encrypted token
-        try:
-            file_bytes = decrypt(encrypted_content.decode()).encode()
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Decryption failed: {exc}") from exc
+        file_bytes = decrypt_bytes(encrypted_content.decode())
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Decryption failed: {exc}") from exc
 
     # Parse
     try:
