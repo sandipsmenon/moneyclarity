@@ -31,8 +31,8 @@ class Settings(BaseSettings):
     environment: str = "development"
     backend_cors_origins: list[str] = ["http://localhost:8501", "https://localhost:8501"]
 
-    # Anthropic (for anonymizer)
-    anthropic_api_key: str = ""
+    # OpenAI (for anonymizer)
+    openai_api_key: str = ""
 
     @property
     def is_production(self) -> bool:

@@ -139,7 +139,7 @@ async def gmail_status(user_id: UserId):
         .maybe_single()
         .execute()
     )
-    if not result.data:
+    if not result or not result.data:
         return {"connected": False}
     return {
         "connected": True,

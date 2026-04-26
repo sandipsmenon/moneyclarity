@@ -77,6 +77,10 @@ class ApiClient:
         data = await self._get("/summary", params=params)
         return [MonthlySummary(**row) for row in data]
 
+    async def get_transactions(self) -> list[dict]:
+        """GET /transactions — retrieve all raw transaction rows."""
+        return await self._get("/transactions")
+
     async def get_gmail_status(self) -> dict:
         """GET /gmail/status — check if Gmail is connected."""
         return await self._get("/gmail/status")

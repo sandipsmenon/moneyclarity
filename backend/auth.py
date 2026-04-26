@@ -1,65 +1,55 @@
 """
 FastAPI dependency for Supabase JWT verification.
 
-Supabase signs JWTs with HS256 using SUPABASE_JWT_SECRET.
-We verify locally for performance — no extra network round-trip.
-
-Usage in endpoint:
-    @router.get("/protected")
-    async def protected(user: dict = Depends(get_current_user)):
-        return {"uid": user["sub"]}
+Verification is delegated to Supabase's API (get_user) rather than done
+locally with a hardcoded algorithm. This handles HS256 (email OTP),
+ES256 (Google OAuth), and any future Supabase signing changes automatically.
 """
 
 from typing import Annotated
 
-import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from backend.config import get_settings
+from backend.services.supabase_client import admin_client
 
 _bearer = HTTPBearer(auto_error=True)
-
-
-def _verify_token(token: str) -> dict:
-    settings = get_settings()
-    try:
-        payload = jwt.decode(
-            token,
-            settings.supabase_jwt_secret,
-            algorithms=["HS256"],
-            audience="authenticated",
-        )
-        return payload
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has expired",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    except jwt.InvalidTokenError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token: {exc}",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
 
 
 async def get_current_user(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(_bearer)],
 ) -> dict:
-    """Return decoded JWT payload. Raises 401 if invalid."""
-    return _verify_token(credentials.credentials)
+    """Verify token via Supabase and return the user dict. Raises 401 if invalid."""
+    token = credentials.credentials
+    try:
+        client = await admin_client()
+        resp = await client.auth.get_user(token)
+        if not resp or not resp.user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        user = resp.user
+        return {"sub": user.id, "email": user.email, "user": user}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Token verification failed: {exc}",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 def get_user_id(user: Annotated[dict, Depends(get_current_user)]) -> str:
-    """Convenience: extract sub (Supabase user UUID) from JWT."""
+    """Convenience: extract sub (Supabase user UUID) from verified user."""
     uid = user.get("sub")
     if not uid:
         raise HTTPException(status_code=401, detail="Missing user id in token")
     return uid
 
 
-# Type alias for cleaner endpoint signatures
+# Type aliases for cleaner endpoint signatures
 CurrentUser = Annotated[dict, Depends(get_current_user)]
 UserId = Annotated[str, Depends(get_user_id)]
